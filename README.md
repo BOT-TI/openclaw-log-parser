@@ -7,10 +7,12 @@
 `ocx` turns noisy `openclaw logs` output into a structured, high-signal
 stream.
 
-It is designed for: - debugging gateway conflicts - tracking agent run
-lifecycles - spotting provider rate limits & connection failures -
-reducing log spam during live sessions - exporting normalized events for
-further analysis
+It is designed for: 
+- debugging gateway conflicts 
+- tracking agent run lifecycles 
+- spotting provider rate limits & connection failures 
+-reducing log spam during live sessions 
+- exporting normalized events for further analysis
 
 ------------------------------------------------------------------------
 
