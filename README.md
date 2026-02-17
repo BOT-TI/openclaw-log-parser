@@ -71,12 +71,6 @@ ocx tail --follow
 openclaw logs --follow | ocx tail --errors-only
 ```
 
-### Disable duplicate collapsing
-
-``` bash
-openclaw logs --follow | ocx tail --no-dedup
-```
-
 ------------------------------------------------------------------------
 
 ## Analyze a saved log file

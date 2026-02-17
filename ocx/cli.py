@@ -288,13 +288,8 @@ def format_event(ev: Event) -> Tuple[str, str]:
     return ("dim", text)
 
 
-def print_event(ev: Event) -> None:
-    style, text = format_event(ev)
-    console.print(f"[{style}]{text}[/{style}]")
-
-
 # =============================================================================
-# Tail helpers: de-duplication
+# De-duplication (always on)
 # =============================================================================
 
 
@@ -302,32 +297,19 @@ def event_key(ev: Event) -> str:
     """
     Key used for deduplication.
 
-    We intentionally ignore timestamps so repeating the same error becomes one
-    summarized line.
+    We intentionally ignore timestamps so repeating the same message becomes
+    one summarized line.
     """
     subs = ev.payload.get("subsystem")
     raw = str(ev.payload.get("raw", ""))
     return f"{ev.type.value}|{ev.name}|{subs}|{raw}"
 
 
-def print_event_deduped(events: Iterable[Event]) -> None:
-    """
-    Print events but collapse consecutive duplicates like:
-
-      gateway.conflict ... (x24)
-    """
+def dedup_consecutive(events: Iterable[Event]) -> Iterator[Tuple[Event, int]]:
+    """Yield (event, count) for consecutive duplicates."""
     last_key: Optional[str] = None
     last_event: Optional[Event] = None
     count = 0
-
-    def flush() -> None:
-        nonlocal last_event, count
-        if last_event is None:
-            return
-        style, text = format_event(last_event)
-        if count > 1:
-            text = f"{text}  [dim](x{count})[/dim]"
-        console.print(f"[{style}]{text}[/{style}]")
 
     for ev in events:
         k = event_key(ev)
@@ -341,12 +323,23 @@ def print_event_deduped(events: Iterable[Event]) -> None:
             count += 1
             continue
 
-        flush()
+        assert last_event is not None
+        yield (last_event, count)
         last_key = k
         last_event = ev
         count = 1
 
-    flush()
+    if last_event is not None:
+        yield (last_event, count)
+
+
+def print_event_deduped(events: Iterable[Event]) -> None:
+    """Always-print with consecutive dedup + (xN)."""
+    for ev, count in dedup_consecutive(events):
+        style, text = format_event(ev)
+        if count > 1:
+            text = f"{text}  [dim](x{count})[/dim]"
+        console.print(f"[{style}]{text}[/{style}]")
 
 
 # =============================================================================
@@ -360,7 +353,6 @@ def tail(
     source: Optional[Path] = typer.Argument(None, help="Log file path (defaults to stdin)."),
     errors_only: bool = typer.Option(False, "--errors-only", help="Only print error-classified events."),
     hide_ws: bool = typer.Option(True, "--hide-ws/--show-ws", help="Hide noisy gateway/ws lines (default: hide)."),
-    dedup: bool = typer.Option(True, "--dedup/--no-dedup", help="Collapse consecutive duplicate lines (default: on)."),
 ):
     """
     Pretty tail for OpenClaw agent runs.
@@ -370,7 +362,6 @@ def tail(
       ocx tail --follow
       ocx tail ./openclaw.log
       ocx tail --follow --errors-only
-      ocx tail --follow --errors-only --no-dedup
     """
     if follow and source is not None:
         raise typer.BadParameter("Use either --follow OR a source file OR stdin, not both.")
@@ -384,11 +375,8 @@ def tail(
     if errors_only:
         event_stream = (ev for ev in event_stream if ev.type == EventType.error)
 
-    if dedup:
-        print_event_deduped(event_stream)
-    else:
-        for ev in event_stream:
-            print_event(ev)
+    # Dedup is ALWAYS on
+    print_event_deduped(event_stream)
 
 
 @app.command()
@@ -401,21 +389,25 @@ def analyze(
 
     Prints:
     - number of distinct runs (run_id)
-    - event type counts
-    - a few representative error samples
+    - event type counts (volume-aware even though output is deduped)
+    - a few representative error samples (deduped with xN)
     """
     counts: Dict[str, int] = {t.value: 0 for t in EventType}
     run_event_counts: Dict[str, int] = {}
     err_samples: List[str] = []
 
-    for ev in parse_events(iter_lines_from_source(source)):
-        counts[ev.type.value] += 1
+    # Dedup is ALWAYS on (but counts keep real volume via count)
+    for ev, n in dedup_consecutive(parse_events(iter_lines_from_source(source))):
+        counts[ev.type.value] += n
         if ev.run_id:
-            run_event_counts[ev.run_id] = run_event_counts.get(ev.run_id, 0) + 1
+            run_event_counts[ev.run_id] = run_event_counts.get(ev.run_id, 0) + n
 
         if ev.type == EventType.error and len(err_samples) < top_errors:
             raw = str(ev.payload.get("raw", ""))
-            err_samples.append(raw[:220])
+            sample = raw[:220]
+            if n > 1:
+                sample = f"{sample} (x{n})"
+            err_samples.append(sample)
 
     table = Table(title="ocx analyze")
     table.add_column("Metric", style="bold")
@@ -443,22 +435,22 @@ def export(
     source: Optional[Path] = typer.Argument(None, help="Log file path (defaults to stdin)."),
 ):
     """
-    Export parsed events as JSONL (one event per line).
+    Export parsed events as JSONL.
 
-    Useful for:
-    - feeding a dashboard later
-    - offline analysis
-    - building a corpus for better classifiers
+    Deduplication is ALWAYS on:
+    - consecutive duplicates are collapsed
+    - `count` tells how many duplicates were collapsed into this row
     """
     if fmt.lower() != "jsonl":
         raise typer.BadParameter("Only --format jsonl is supported in v0.1")
 
-    for ev in parse_events(iter_lines_from_source(source)):
+    for ev, n in dedup_consecutive(parse_events(iter_lines_from_source(source))):
         out = {
             "ts": ev.ts,
             "run_id": ev.run_id,
             "type": ev.type.value,
             "name": ev.name,
+            "count": n,
             "payload": ev.payload,
         }
         sys.stdout.write(json.dumps(out, ensure_ascii=False) + "\n")
